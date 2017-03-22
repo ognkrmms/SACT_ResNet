@@ -1,3 +1,4 @@
+using Knet
 using Images,MAT
 
 function main(args="")
@@ -5,8 +6,9 @@ function main(args="")
     xtrn,ytrn,xtst,ytst = loaddata("cifar10")
     dtrn = minibatch(xtrn,ytrn,batchsize)
     dtst = minibatch(xtst,ytst,batchsize)
-    println(string(size(dtrn[1][1])))
-
+    
+    
+    println("training accuracy and loss: ",accuracy(dtrn,10)," test accuracy and loss: ",accuracy(dtst,10))
 end
 
 
@@ -30,14 +32,7 @@ function loaddata(dataset)
         xtst = data["data"]
         ytst = data["labels"]
     end
-    
-
-    #img[:,:,1] = reshape(img_data[1:1024],32,32)'
-    #img[:,:,2] = reshape(img_data[1025:2048],32,32)'
-    #img[:,:,3] = reshape(img_data[2049:3072],32,32)'
-    
-    
-
+    #Remember for ImageNet
     #separate{C<:Colorant}(img::AbstractArray{C,2}) is deprecated, use permuteddimsview(channelview(img), (2,3,1)) instead.
     return xtrn,ytrn,xtst,ytst
 end
@@ -63,4 +58,27 @@ function minibatch(x,y,batchsize; atype=Array{Float32}, xrows=32, yrows=32, xsca
     return data
 end
 
+#function generates random classes at the moment.
+function predict(x,nclasses)
+    nInstances = size(x,4)
+    output = randn(nclasses, nInstances) * 0.1
+end
+
+function loss(x,ygold,nclasses)
+    ypred = predict(x,nclasses)
+    ynorm = logp(ypred,1)
+    return -sum(ygold .* ynorm) / size(ygold,2)
+end
+
+function accuracy(dtst, nclasses, pred=predict)
+    ncorrect = ninstance = nloss = 0
+    for (x, ygold) in dtst
+        ypred = pred(x,nclasses)
+        ynorm = logp(ypred,1)
+        nloss += -sum(ygold .* ynorm)
+        ncorrect += sum(ygold .* (ypred .== maximum(ypred,1)))
+        ninstance += size(ygold,2)
+    end
+    return (ncorrect/ninstance, nloss/ninstance)
+end
 main()
