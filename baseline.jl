@@ -7,7 +7,13 @@ function main(args="")
     dtrn = minibatch(xtrn,ytrn,batchsize)
     dtst = minibatch(xtst,ytst,batchsize)
     w,ms = init_weights("cifar10")
-    println("training accuracy and loss: ",accuracy(w,dtrn,ms;mode=0)," test accuracy and loss: ",accuracy(w,dtst,ms))
+    prms = init_opt_param(w)
+   
+    report(epoch)=println((:epoch,epoch,:trn,accuracy(w,dtrn,ms),:tst,accuracy(w,dtst,ms)))
+    @time for i=1:1
+        train(w,dtrn,ms,prms)
+        report(epoch)
+    end
 end
 
 
@@ -62,11 +68,13 @@ function predict(x,nclasses)
     output = randn(nclasses, nInstances) * 0.1
 end
 
-function loss(x,ygold,nclasses)
-    ypred = predict(x,nclasses)
+function loss(w,x,ms,ygold;mode=1)
+    ypred = resnet_cifar(w,x,ms;mode=mode)
     ynorm = logp(ypred,1)
     return -sum(ygold .* ynorm) / size(ygold,2)
 end
+
+lossgradient = grad(loss)
 
 function accuracy(w,dtst,ms, pred=resnet_cifar;mode=1)
     ncorrect = ninstance = nloss = 0
@@ -81,6 +89,17 @@ function accuracy(w,dtst,ms, pred=resnet_cifar;mode=1)
     return (ncorrect/ninstance, nloss/ninstance)
 end
 
+function train(w,dtrn,ms,prms)
+    for (x,y) in dtrn
+        x = convert(KnetArray{Float32}, x)
+        y = convert(KnetArray{Float32}, y)
+        g = lossgradient(w,x,ms,y;mode=0)
+        for k=1:length(prms)
+          update!(w[k],g[k],prms[k])
+        end
+    end
+end
+
 function resnet_cifar(w,x,ms;mode=1)
     x_gpu = convert(KnetArray{Float32},x)
     z = conv4(w[1],x_gpu; padding=1, stride=1) .+ w[2]
@@ -88,7 +107,7 @@ function resnet_cifar(w,x,ms;mode=1)
     z = reslayerx5(w[5:43], z, ms; strides=[1,1,1,1], mode=mode)
     z = reslayerx5(w[44:82], z, ms; mode=mode)
     z = reslayerx5(w[83:121], z, ms; mode=mode)
-
+    
     z  = pool(z; stride=1, window=8, mode=2)
     z = w[122] * mat(z) .+ w[123]
 end
@@ -211,4 +230,11 @@ function reslayerx5(w,x,ms; strides=[2,2,1,1], mode=1)
     return x
 end
 
+function init_opt_param(weights)
+    prms = Any[]
+    for k=1:length(weights)
+        push!(prms, Momentum(;lr=0.001, gclip=0, gamma=0.9))
+    end
+    return prms
+end
 main()
