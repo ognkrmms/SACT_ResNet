@@ -4,9 +4,9 @@ using JLD
 
 function main(args="")
     batchsize = 10
-    xtrn,ytrn,xtst,ytst = loaddata("cifar10")
-    dtrn = minibatch(xtrn,ytrn,batchsize)
-    dtst = minibatch(xtst,ytst,batchsize)
+    xtrn,ytrn,xtst,ytst,mean_im = loaddata("cifar10")
+    dtrn = minibatch(xtrn,ytrn,mean_im,batchsize)
+    dtst = minibatch(xtst,ytst,mean_im,batchsize)
     w,ms = init_weights("cifar10")
     prms = init_opt_param(w)
     
@@ -37,14 +37,16 @@ function loaddata(dataset)
         data = matread(string(path,filename))
         xtst = data["data"]
         ytst = data["labels"]
+
+        mean_im = load("models/mean_cifar.jld","mean_image")
     end
     #Remember for ImageNet
     #separate{C<:Colorant}(img::AbstractArray{C,2}) is deprecated, use permuteddimsview(channelview(img), (2,3,1)) instead.
-    return xtrn,ytrn,xtst,ytst
+    return xtrn,ytrn,xtst,ytst,mean_im
 end
 
 
-function minibatch(x,y,batchsize; atype=Array{Float32}, xrows=32, yrows=32, xscale=255)
+function minibatch(x,y,mean_im,batchsize; atype=Array{Float32}, xrows=32, yrows=32, xscale=255)
     row2im(a) = permutedims(convert(atype, reshape(a, 32, 32, 3)), (2,1,3))
     n_data = size(x,1)
     n_data == length(y) || throw(DimensionMismatch())
@@ -56,6 +58,7 @@ function minibatch(x,y,batchsize; atype=Array{Float32}, xrows=32, yrows=32, xsca
         all_data[:,:,:,i] = row2im(x[i,:])
         all_labels[y[i]+1,i] = 1        
     end
+    all_data = all_data .- mean_im
     data = Any[]
     for i=1:batchsize:n_data-batchsize+1#10*batchsize+1 for small experiments
         push!(data,(all_data[:,:,:,i:i+batchsize-1], all_labels[:,i:i+batchsize-1]))
@@ -185,7 +188,7 @@ function batchnorm(w, x, ms; mode=1, avg_decay=0.997,epsilon=1e-5)
         sigma_old = shift!(ms)
 
         mu = avg_decay * mu_old + (1-avg_decay) * mu
-        sigma_sq = avg_decay * (sigma_old.^2) + (1-avg_decay) *sigma_sq
+        sigma_sq = avg_decay * (sigma_old.*sigma_old) + (1-avg_decay) *sigma_sq
         sigma = sqrt(sigma_sq + epsilon)
 
     elseif mode == 1
