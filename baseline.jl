@@ -1,5 +1,6 @@
 using Knet
 using Images,MAT
+using JLD
 
 function main(args="")
     batchsize = 10
@@ -8,9 +9,9 @@ function main(args="")
     dtst = minibatch(xtst,ytst,batchsize)
     w,ms = init_weights("cifar10")
     prms = init_opt_param(w)
-   
+    
     report(epoch)=println((:epoch,epoch,:trn,accuracy(w,dtrn,ms),:tst,accuracy(w,dtst,ms)))
-    @time for i=1:1
+    @time for epoch=1:1
         train(w,dtrn,ms,prms)
         report(epoch)
     end
@@ -56,7 +57,7 @@ function minibatch(x,y,batchsize; atype=Array{Float32}, xrows=32, yrows=32, xsca
         all_labels[y[i]+1,i] = 1        
     end
     data = Any[]
-    for i=1:batchsize:n_data-batchsize+1
+    for i=1:batchsize:n_data-batchsize+1#10*batchsize+1 for small experiments
         push!(data,(all_data[:,:,:,i:i+batchsize-1], all_labels[:,i:i+batchsize-1]))
     end
     return data
@@ -91,7 +92,8 @@ end
 
 function train(w,dtrn,ms,prms)
     for (x,y) in dtrn
-        x = convert(KnetArray{Float32}, x)
+        aug_x = augment_cifar10(x)
+        x = convert(KnetArray{Float32}, aug_x)
         y = convert(KnetArray{Float32}, y)
         g = lossgradient(w,x,ms,y;mode=0)
         for k=1:length(prms)
@@ -237,4 +239,42 @@ function init_opt_param(weights)
     end
     return prms
 end
+ 
+function augment_cifar10(x)
+    y = zeros(Float32,size(x))
+    padded = zeros(size(x,1)+8,size(x,2)+8,size(x,3))
+    h = size(x,1)
+    w = size(x,2)
+    c = size(x,3)
+    b = size(x,4)
+    hflip = rand([false,true],b)
+    xi = rand(collect(1:9),b)
+    xj = rand(collect(1:9),b)
+
+    for i=1:size(y,4)
+        if hflip[i]
+            padded[4:3+h,4:3+w,:] = flipdim(x[:,:,:,i],2)
+        else
+            padded[4:3+h,4:3+w,:] = x[:,:,:,i]
+        end
+        y[:,:,:,i] = padded[xi[i]:xi[i]+31, xj[i]:xj[i]+31, :]
+    end
+    return y
+end
+
+function load_model(filename)
+    model = load(string("models/",filename))
+    w = model["w"]
+    ms = model["ms"]
+    w = map(x->convert(KnetArray,x),w)
+    ms = map(KnetArray,ms)
+    return w,ms
+end
+
+function save_model(w,ms,filename)
+    weight = map(Array, w)
+    moments = map(Array, ms)
+    save(string("models/",filename),"w",weight,"ms",moments)
+end
+
 main()
