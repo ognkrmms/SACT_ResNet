@@ -10,13 +10,12 @@ function main(args="")
     w,ms = init_weights("cifar10")
     prms = init_opt_param(w)
     
-    report(epoch)=println((:epoch,epoch,:trn,accuracy(w,dtrn,ms),:tst,accuracy(w,dtst,ms)))
+    report(epoch)=println((:epoch,epoch,:trn,accuracy(w,dtrn,ms),:tst,accuracy(w,dtst,ms),:wnorm,squared_sum_weights(w)))
     @time for epoch=1:1
         train(w,dtrn,ms,prms)
         report(epoch)
     end
 end
-
 
 function loaddata(dataset)
     path = "../dataset/cifar-10-batches-mat/"
@@ -60,8 +59,13 @@ function minibatch(x,y,mean_im,batchsize; atype=Array{Float32}, xrows=32, yrows=
     end
     all_data = all_data .- mean_im
     data = Any[]
-    for i=1:batchsize:n_data-batchsize+1#10*batchsize+1 for small experiments
+    #n_data = n_data > 20000 ? n_data-49000 : n_data #for small experiments
+    n_batches = Int(floor(n_data / batchsize))
+    for i=1:batchsize:n_batches*batchsize
         push!(data,(all_data[:,:,:,i:i+batchsize-1], all_labels[:,i:i+batchsize-1]))
+    end
+    if n_batches != n_data/batchsize
+        push!(data,(all_data[:,:,:,n_batches*batchsize+1:end], all_labels[:,n_batches*batchsize+1:end]))
     end
     return data
 end
@@ -75,7 +79,11 @@ end
 function loss(w,x,ms,ygold;mode=1)
     ypred = resnet_cifar(w,x,ms;mode=mode)
     ynorm = logp(ypred,1)
-    return -sum(ygold .* ynorm) / size(ygold,2)
+    return -sum(ygold .* ynorm) / size(ygold,2) + 0.0001 * squared_sum_weights(w)
+end
+
+function squared_sum_weights(w)
+    return sum(map(a->sum(a.*a),w))
 end
 
 lossgradient = grad(loss)
@@ -122,10 +130,10 @@ function init_weights(dataset;s=0.1)
     ms = Any[]
     if dataset == "cifar10"
         #block 1
-        push!(w,randn(Float32, (3,3,3,64))*s) #1
-        push!(w, zeros(Float32,1))
-        push!(w,randn(Float32, 1)*s)
-        push!(w, zeros(Float32,1)) #4
+        push!(w,generate_resnet_weights((3,3,3,64))) #1
+        push!(w,zeros(Float32,1,1,64,1))
+        push!(w,ones(Float32, 1,1,64,1))
+        push!(w,zeros(Float32,1,1,64,1)) #4
         push!(ms,zeros(Float32,1,1,64,1))
         push!(ms,zeros(Float32,1,1,64,1));#(0.00316)*ones
         #block 2
@@ -161,9 +169,9 @@ function init_weights(dataset;s=0.1)
 end
 
 function bottleneck_single_layer(w,ms,kernel_size,s)
-    push!(w,randn(Float32, (kernel_size,kernel_size,64,64))*s) #5
-    push!(w,randn(Float32,1)*s)
-    push!(w,zeros(Float32,1)) #7
+    push!(w,generate_resnet_weights((kernel_size,kernel_size,64,64))) #5
+    push!(w,ones(Float32,1,1,64,1))
+    push!(w,zeros(Float32,1,1,64,1)) #7
 
     push!(ms,zeros(Float32,1,1,64,1))
     push!(ms,zeros(Float32,1,1,64,1))#(0.00316)*ones
@@ -173,6 +181,12 @@ function bottleneck_full_layer(w,ms,s)
     bottleneck_single_layer(w,ms,1,s)
     bottleneck_single_layer(w,ms,3,s)
     bottleneck_single_layer(w,ms,1,s)
+end
+
+function generate_resnet_weights(tensor_size)
+    n = tensor_size[1]*tensor_size[2]*tensor_size[3]
+    w = randn(Float32, tensor_size) * sqrt(2/n)
+    return w
 end
 
 function batchnorm(w, x, ms; mode=1, avg_decay=0.997,epsilon=1e-5)
@@ -238,11 +252,17 @@ end
 function init_opt_param(weights)
     prms = Any[]
     for k=1:length(weights)
-        push!(prms, Momentum(;lr=0.001, gclip=0, gamma=0.9))
+        push!(prms, Momentum(;lr=0.001, gamma=0.9))
     end
     return prms
 end
- 
+
+function change_lr(prms,new_lr)
+    for k=1:length(prms)
+        prms[k].lr = new_lr
+    end
+end
+
 function augment_cifar10(x)
     y = zeros(Float32,size(x))
     padded = zeros(size(x,1)+8,size(x,2)+8,size(x,3))
