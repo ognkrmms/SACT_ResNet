@@ -3,18 +3,23 @@ using Images,MAT
 using JLD
 
 function main(args="")
-    batchsize = 10
+    batchsize = 64
+    block_size = 6
+    lr=0.001
     xtrn,ytrn,xtst,ytst,mean_im = loaddata("cifar10")
     dtrn = minibatch(xtrn,ytrn,mean_im,batchsize)
     dtst = minibatch(xtst,ytst,mean_im,batchsize)
-    w,ms = init_weights("cifar10")
-    prms = init_opt_param(w)
-    
-    report(epoch)=println((:epoch,epoch,:trn,accuracy(w,dtrn,ms),:tst,accuracy(w,dtst,ms),:wnorm,squared_sum_weights(w)))
-    @time for epoch=1:1
-        train(w,dtrn,ms,prms)
+    w,ms = init_weights("cifar10",block_size)
+    prms = init_opt_param(w,lr)
+    #Knet.knetgc(); gc()
+    println("batchsize= $(batchsize), blocksize= $(block_size), lr=$(lr)")
+    report(epoch)=println((:epoch,epoch,:trn,accuracy(w,dtrn,ms,block_size),:tst,accuracy(w,dtst,ms,block_size),:wnorm,squared_sum_weights(w)))
+    report2(epoch)=println((:epoch,epoch,:trn,accuracy(w,dtrn,ms,block_size),:wnorm,squared_sum_weights(w)))
+    @time for epoch=1:15
+        train(w,dtrn,ms,block_size,prms)
         report(epoch)
     end
+    #save_model(w,ms,"weights.jld")
 end
 
 function loaddata(dataset)
@@ -59,13 +64,14 @@ function minibatch(x,y,mean_im,batchsize; atype=Array{Float32}, xrows=32, yrows=
     end
     all_data = all_data .- mean_im
     data = Any[]
-    #n_data = n_data > 20000 ? n_data-49000 : n_data #for small experiments
+    #n_data = n_data > 20000 ? 10000: n_data #for small experiments
     n_batches = Int(floor(n_data / batchsize))
     for i=1:batchsize:n_batches*batchsize
         push!(data,(all_data[:,:,:,i:i+batchsize-1], all_labels[:,i:i+batchsize-1]))
     end
     if n_batches != n_data/batchsize
-        push!(data,(all_data[:,:,:,n_batches*batchsize+1:end], all_labels[:,n_batches*batchsize+1:end]))
+        push!(data,(all_data[:,:,:,n_batches*batchsize+1:n_data], all_labels[:,n_batches*batchsize+1:n_data]))
+        #println(size(all_labels[:,n_batches*batchsize+1:n_data]))
     end
     return data
 end
@@ -76,8 +82,8 @@ function predict(x,nclasses)
     output = randn(nclasses, nInstances) * 0.1
 end
 
-function loss(w,x,ms,ygold;mode=1)
-    ypred = resnet_cifar(w,x,ms;mode=mode)
+function loss(w,x,ms,block_size,ygold;mode=1)
+    ypred = resnet_cifar(w,x,ms,block_size;mode=mode)
     ynorm = logp(ypred,1)
     return -sum(ygold .* ynorm) / size(ygold,2) + 0.0001 * squared_sum_weights(w)
 end
@@ -88,99 +94,113 @@ end
 
 lossgradient = grad(loss)
 
-function accuracy(w,dtst,ms, pred=resnet_cifar;mode=1)
+function accuracy(w,dtst,ms, block_size,pred=resnet_cifar;mode=1)
     ncorrect = ninstance = nloss = 0
     for (x, ygold) in dtst
-        ygold_gpu = convert(KnetArray{Float32},ygold)
-        ypred = pred(w,x,ms;mode=mode)
+        ygold = convert(KnetArray{Float32},ygold)
+        x = convert(KnetArray{Float32},x)
+        ypred = pred(w,x,ms,block_size;mode=mode)
         ynorm = logp(ypred,1)
-        nloss += -sum(ygold_gpu .* ynorm)
-        ncorrect += sum(ygold_gpu .* (ypred .== maximum(ypred,1)))
+        nloss += -sum(ygold .* ynorm)
+        ncorrect += sum(ygold .* (ypred .== maximum(ypred,1)))
         ninstance += size(ygold,2)
     end
     return (ncorrect/ninstance, nloss/ninstance)
 end
 
-function train(w,dtrn,ms,prms)
+function train(w,dtrn,ms,block_size,prms)
     for (x,y) in dtrn
         aug_x = augment_cifar10(x)
         x = convert(KnetArray{Float32}, aug_x)
         y = convert(KnetArray{Float32}, y)
-        g = lossgradient(w,x,ms,y;mode=0)
+        g = lossgradient(w,x,ms,block_size,y;mode=0)
         for k=1:length(prms)
           update!(w[k],g[k],prms[k])
         end
     end
 end
 
-function resnet_cifar(w,x,ms;mode=1)
-    x_gpu = convert(KnetArray{Float32},x)
-    z = conv4(w[1],x_gpu; padding=1, stride=1) .+ w[2]
+function resnet_cifar(w,x,ms,block_size;mode=1)
+    z = conv4(w[1],x; padding=1, stride=1) .+ w[2]
     z = batchnorm(w[3:4],z,ms; mode=mode)
-    z = reslayerx5(w[5:43], z, ms; strides=[1,1,1,1], mode=mode)
-    z = reslayerx5(w[44:82], z, ms; mode=mode)
-    z = reslayerx5(w[83:121], z, ms; mode=mode)
+    
+    fin1 = 5+3+block_size*9-1
+    fin2 = fin1 + 3 + block_size*9
+    fin3 = fin2 + 3 + block_size*9
+    z = reslayerx5(w[5:fin1], z, ms; strides=[1,1,1,1], mode=mode)
+    z = reslayerx5(w[fin1+1:fin2], z, ms; mode=mode)
+    z = reslayerx5(w[fin2+1:fin3], z, ms; mode=mode)
     
     z  = pool(z; stride=1, window=8, mode=2)
-    z = w[122] * mat(z) .+ w[123]
+    z = w[end-1] * mat(z) .+ w[end]
 end
 
-function init_weights(dataset;s=0.1)
+function init_weights(dataset,block_size;s=0.1)
     w = Any[]
     ms = Any[]
+    filt_size = 16
     if dataset == "cifar10"
         #block 1
-        push!(w,generate_resnet_weights((3,3,3,64))) #1
-        push!(w,zeros(Float32,1,1,64,1))
-        push!(w,ones(Float32, 1,1,64,1))
-        push!(w,zeros(Float32,1,1,64,1)) #4
-        push!(ms,zeros(Float32,1,1,64,1))
-        push!(ms,zeros(Float32,1,1,64,1));#(0.00316)*ones
+        push!(w,generate_resnet_weights((3,3,3,filt_size))) #1
+        push!(w,zeros(Float32,1,1,filt_size,1))
+        push!(w,ones(Float32, 1,1,filt_size,1))
+        push!(w,zeros(Float32,1,1,filt_size,1)) #4
+        push!(ms,zeros(Float32,1,1,filt_size,1))
+        push!(ms,zeros(Float32,1,1,filt_size,1));
         #block 2
-        for i=1:4
+        for i=1:block_size
             if i== 1
-                bottleneck_single_layer(w,ms,1,s) #5 to 7
+                bottleneck_single_layer(w,ms,(1,1,filt_size,4*filt_size)) #5 to 7
+                bottleneck_full_layer(w,ms,filt_size,filt_size,4*filt_size) #8 to 16
+            else
+                #17 to 25, 26 to 34, 35 to 43
+                bottleneck_full_layer(w,ms,4*filt_size,filt_size,4*filt_size)
             end
-            #8 to 16, 17 to 25, 26 to 34, 35 to 43
-            bottleneck_full_layer(w,ms,s)
         end
+        input_size = 4*filt_size
         #block 3
-        for i=1:4
+        for i=1:block_size
             if i== 1
-                bottleneck_single_layer(w,ms,1,s) #44 to 46
+                bottleneck_single_layer(w,ms,(1,1,input_size,input_size*2)) #44 to 46
+                bottleneck_full_layer(w,ms,input_size,Int(input_size/2),input_size*2) # 47 to 55
+            else
+                # 56 to 64, 65 to 73, 74 to 82
+                bottleneck_full_layer(w,ms,input_size*2,Int(input_size/2),input_size*2)
             end
-            #47 to 55, 56 to 64, 65 to 73, 74 to 82
-            bottleneck_full_layer(w,ms,s)
         end
+        input_size = input_size * 2
         #block 4
-        for i=1:4
+        for i=1:block_size
             if i== 1
-                bottleneck_single_layer(w,ms,1,s) #83 to 85
+                bottleneck_single_layer(w,ms,(1,1,input_size,input_size*2)) #83 to 85
+                bottleneck_full_layer(w,ms,input_size,Int(input_size/2),input_size*2) # 86 to 94
+            else
+                # 95 to 103, 104 to 112, 113 to 121
+                bottleneck_full_layer(w,ms,input_size*2,Int(input_size/2),input_size*2)
             end
-            #86 to 94, 95 to 103, 104 to 112, 113 to 121
-            bottleneck_full_layer(w,ms,s)
         end
+        input_size = input_size * 2
         #fc 121 to 123
-        push!(w,randn(Float32, (10,64))*s)
+        push!(w,randn(Float32, (10,input_size))*s)
         push!(w,zeros(Float32, (10,1))*s)
     end
 
     return map(x->convert(KnetArray{Float32},x),w),map(KnetArray,ms)
 end
 
-function bottleneck_single_layer(w,ms,kernel_size,s)
-    push!(w,generate_resnet_weights((kernel_size,kernel_size,64,64))) #5
-    push!(w,ones(Float32,1,1,64,1))
-    push!(w,zeros(Float32,1,1,64,1)) #7
+function bottleneck_single_layer(w,ms,tensor_size)
+    push!(w,generate_resnet_weights(tensor_size)) #5
+    push!(w,ones(Float32,1,1,tensor_size[4],1))
+    push!(w,zeros(Float32,1,1,tensor_size[4],1)) #7
 
-    push!(ms,zeros(Float32,1,1,64,1))
-    push!(ms,zeros(Float32,1,1,64,1))#(0.00316)*ones
+    push!(ms,zeros(Float32,1,1,tensor_size[4],1))
+    push!(ms,zeros(Float32,1,1,tensor_size[4],1))
 end
 
-function bottleneck_full_layer(w,ms,s)
-    bottleneck_single_layer(w,ms,1,s)
-    bottleneck_single_layer(w,ms,3,s)
-    bottleneck_single_layer(w,ms,1,s)
+function bottleneck_full_layer(w,ms,channel_size,filter_size,out_size)
+    bottleneck_single_layer(w,ms,(1,1,channel_size,filter_size))
+    bottleneck_single_layer(w,ms,(3,3,filter_size,filter_size))
+    bottleneck_single_layer(w,ms,(1,1,filter_size,out_size))
 end
 
 function generate_resnet_weights(tensor_size)
@@ -249,10 +269,10 @@ function reslayerx5(w,x,ms; strides=[2,2,1,1], mode=1)
     return x
 end
 
-function init_opt_param(weights)
+function init_opt_param(weights,lr)
     prms = Any[]
     for k=1:length(weights)
-        push!(prms, Momentum(;lr=0.001, gamma=0.9))
+        push!(prms, Momentum(;lr=lr, gamma=0.9))
     end
     return prms
 end
