@@ -5,7 +5,7 @@ using JLD
 function main(args="")
     batchsize = 128
     lr=0.1
-    l1reg = 0.0001
+    l1reg = 0.00001
     aug = true
 
     xtrn,ytrn,xtst,ytst,mean_im = loaddata("cifar10")
@@ -13,7 +13,7 @@ function main(args="")
     dtst = minibatch(xtst,ytst,mean_im,batchsize)
     w,ms = init_weights("cifar10")
     #w,ms = load_model("weights_keras_epoch128.jld")
-    #prms = init_opt_param(w,lr)
+    prms = init_opt_param(w,lr)
     #prms = init_opt_param_adam(w)
     #Knet.knetgc(); gc()
     
@@ -21,7 +21,7 @@ function main(args="")
     report(epoch,ac1,ac2,n1)=println((:epoch,epoch,:trn,ac1,:tst,ac2,:norm,n1))
     println((:epoch,0,:trn,accuracy(w,dtrn,ms),:tst,accuracy(w,dtst,ms),:wnorm,squared_sum_weights(w)))
     epoch=1
-    @time for epoch=1:200
+    @time for epoch=1:300
         train(w,dtrn,ms,prms;l1=l1reg,aug=aug)
         ac1 = accuracy(w,dtrn,ms)
         ac2 = accuracy(w,dtst,ms)
@@ -39,7 +39,7 @@ function main(args="")
         n1 = squared_sum_weights(w)
         report(epoch,ac1,ac2,n1)
 
-        if n1 == NaN32
+        if n1 == NaN32 || ac1[1] == 1.0
             break
         end
     end
@@ -104,7 +104,7 @@ function predict(x,nclasses)
     output = randn(nclasses, nInstances) * 0.1
 end
 
-function loss(w,x,ms,ygold;;l1=0, mode=1)
+function loss(w,x,ms,ygold;l1=0, mode=1)
     ypred = resnet_cifar(w,x,ms;mode=mode)
     ynorm = logp(ypred,1)
     J = -sum(ygold .* ynorm) / size(ygold,2)
