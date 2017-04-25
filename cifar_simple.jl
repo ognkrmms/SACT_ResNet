@@ -150,10 +150,10 @@ end
 
 function resnet_cifar(w,x,ms;mode=1)
     z = conv4(w[1],x; padding=1, stride=2)
-    z = batchnorm(w[2:3],z,ms[1:2]; mode=mode)
-    
+    z = batchnorm(w[2:3],z,ms,1; mode=mode)
+
     for i=1:10
-        z = reslayerx4(w[4+(i-1)*9:4+i*9-1],z,ms[3+(i-1)*6:8+(i-1)*6];mode=mode)
+        z = reslayerx4(w[4+(i-1)*9:4+i*9-1],z,ms,3+(i-1)*6;mode=mode)
     end
     
     z  = pool(z; stride=1, window=16, mode=2)
@@ -203,7 +203,7 @@ function generate_resnet_weights(tensor_size)
     return w
 end
 
-function batchnorm(w, x, ms; mode=1, avg_decay=0.997,epsilon=1e-5)
+function batchnorm(w, x, ms,idx; mode=1, avg_decay=0.997,epsilon=1e-5)
     if mode == 0
         d = ndims(x) == 4 ? (1,2,4) : (2,)
         s = prod(size(x)[[d...]])
@@ -213,43 +213,43 @@ function batchnorm(w, x, ms; mode=1, avg_decay=0.997,epsilon=1e-5)
 
         xhat = (x.-mu) ./ sqrt(sigma_sq + epsilon)
 
-        mu = avg_decay * ms[1] + (1-avg_decay) * mu
-        sigma_sq = avg_decay * (ms[2].*ms[2]) + (1-avg_decay) *sigma_sq
+        mu = avg_decay * ms[idx] + (1-avg_decay) * mu
+        sigma_sq = avg_decay * (ms[idx+1].*ms[idx+1]) + (1-avg_decay) *sigma_sq
         sigma = sqrt(sigma_sq + epsilon)
-        ms[1] = AutoGrad.getval(mu)
-        ms[2] = AutoGrad.getval(sigma)
+        ms[idx] = AutoGrad.getval(mu)
+        ms[idx+1] = AutoGrad.getval(sigma)
     elseif mode == 1
         d = ndims(x) == 4 ? (1,2,4) : (2,)
         s = prod(size(x)[[d...]])
-        xhat = (x.-ms[1]) ./ (sqrt(s/(s-1))*ms[2])
+        xhat = (x.-ms[idx]) ./ (sqrt(s/(s-1))*ms[idx+1])
     end    
     
     return w[1] .* xhat .+ w[2]
 end
 
-function reslayerx0(w,x,ms; padding=0, stride=1, mode=1)
+function reslayerx0(w,x,ms,ms_idx; padding=0, stride=1, mode=1)
     b  = conv4(w[1],x; padding=padding, stride=stride)
-    bx = batchnorm(w[2:3],b,ms; mode=mode)
+    bx = batchnorm(w[2:3],b,ms,ms_idx; mode=mode)
 end
 
-function reslayerx1(w,x,ms; padding=0, stride=1, mode=1)
-    relu(reslayerx0(w,x,ms; padding=padding, stride=stride, mode=mode))
+function reslayerx1(w,x,ms,ms_idx; padding=0, stride=1, mode=1)
+    relu(reslayerx0(w,x,ms,ms_idx; padding=padding, stride=stride, mode=mode))
 end
 
-function reslayerx2(w,x,ms; pads=[0,1,0], strides=[1,1,1], mode=1)
-    ba = reslayerx1(w[1:3],x,ms[1:2]; padding=pads[1], stride=strides[1], mode=mode)
-    bb = reslayerx1(w[4:6],ba,ms[3:4]; padding=pads[2], stride=strides[2], mode=mode)
-    bc = reslayerx0(w[7:9],bb,ms[5:6]; padding=pads[3], stride=strides[3], mode=mode)
+function reslayerx2(w,x,ms,ms_idx; pads=[0,1,0], strides=[1,1,1], mode=1)
+    ba = reslayerx1(w[1:3],x,ms,ms_idx; padding=pads[1], stride=strides[1], mode=mode)
+    bb = reslayerx1(w[4:6],ba,ms,ms_idx+2; padding=pads[2], stride=strides[2], mode=mode)
+    bc = reslayerx0(w[7:9],bb,ms,ms_idx+4; padding=pads[3], stride=strides[3], mode=mode)
 end
 
-function reslayerx3(w,x,ms; pads=[0,0,1,0], strides=[2,2,1,1], mode=1) # 12
-    a = reslayerx0(w[1:3],x,ms[1:2]; stride=strides[1], padding=pads[1], mode=mode)
-    b = reslayerx2(w[4:12],x,ms[3:8]; strides=strides[2:4], pads=pads[2:4], mode=mode)
+function reslayerx3(w,x,ms,ms_idx; pads=[0,0,1,0], strides=[2,2,1,1], mode=1) # 12
+    a = reslayerx0(w[1:3],x,ms,ms_idx; stride=strides[1], padding=pads[1], mode=mode)
+    b = reslayerx2(w[4:12],x,ms,ms_idx+2; strides=strides[2:4], pads=pads[2:4], mode=mode)
     relu(a .+ b)
 end
 
-function reslayerx4(w,x,ms; pads=[0,1,0], strides=[1,1,1], mode=1)
-    relu(x .+ reslayerx2(w,x,ms; pads=pads, strides=strides, mode=mode))
+function reslayerx4(w,x,ms,ms_idx; pads=[0,1,0], strides=[1,1,1], mode=1)
+    relu(x .+ reslayerx2(w,x,ms,ms_idx; pads=pads, strides=strides, mode=mode))
 end
 
 function reslayerx5(w,x,ms; strides=[2,2,1,1], mode=1)
