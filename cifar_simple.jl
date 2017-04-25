@@ -18,7 +18,7 @@ function main(args="")
     #Knet.knetgc(); gc()
     
     println("batchsize= $(batchsize), lr=$(lr), l1reg=$(l1reg),aug=$(aug)")
-    report(epoch,ac1,ac2,n1)=println((:epoch,epoch,:trn,ac1,:tst,ac2,:norm,n1))
+    report(epoch,ac1,ac2,n1)=println((:epoch,epoch,:trn,ac1,:tst,ac2,:norm,n1))    
     println((:epoch,0,:trn,accuracy(w,dtrn,ms),:tst,accuracy(w,dtst,ms),:wnorm,squared_sum_weights(w)))
     epoch=1
     @time for epoch=1:300
@@ -150,10 +150,10 @@ end
 
 function resnet_cifar(w,x,ms;mode=1)
     z = conv4(w[1],x; padding=1, stride=2)
-    z = batchnorm(w[2:3],z,ms; mode=mode)
+    z = batchnorm(w[2:3],z,ms[1:2]; mode=mode)
     
     for i=1:10
-        z = reslayerx4(w[4+(i-1)*9:4+i*9-1],z,ms;mode=mode)
+        z = reslayerx4(w[4+(i-1)*9:4+i*9-1],z,ms[3+(i-1)*6:8+(i-1)*6];mode=mode)
     end
     
     z  = pool(z; stride=1, window=16, mode=2)
@@ -204,7 +204,6 @@ function generate_resnet_weights(tensor_size)
 end
 
 function batchnorm(w, x, ms; mode=1, avg_decay=0.997,epsilon=1e-5)
-    mu, sigma = nothing, nothing
     if mode == 0
         d = ndims(x) == 4 ? (1,2,4) : (2,)
         s = prod(size(x)[[d...]])
@@ -214,21 +213,15 @@ function batchnorm(w, x, ms; mode=1, avg_decay=0.997,epsilon=1e-5)
 
         xhat = (x.-mu) ./ sqrt(sigma_sq + epsilon)
 
-        mu_old = shift!(ms)
-        sigma_old = shift!(ms)
-
-        mu = avg_decay * mu_old + (1-avg_decay) * mu
-        sigma_sq = avg_decay * (sigma_old.*sigma_old) + (1-avg_decay) *sigma_sq
+        mu = avg_decay * ms[1] + (1-avg_decay) * mu
+        sigma_sq = avg_decay * (ms[2].*ms[2]) + (1-avg_decay) *sigma_sq
         sigma = sqrt(sigma_sq + epsilon)
-        push!(ms, AutoGrad.getval(mu), AutoGrad.getval(sigma))
+        ms[1] = AutoGrad.getval(mu)
+        ms[2] = AutoGrad.getval(sigma)
     elseif mode == 1
-        mu = shift!(ms)
-        sigma = shift!(ms)
         d = ndims(x) == 4 ? (1,2,4) : (2,)
         s = prod(size(x)[[d...]])
-        xhat = (x.-mu) ./ (sqrt(s/(s-1))*sigma)
-        # we need getval in backpropagation
-        push!(ms, AutoGrad.getval(mu), AutoGrad.getval(sigma))
+        xhat = (x.-ms[1]) ./ (sqrt(s/(s-1))*ms[2])
     end    
     
     return w[1] .* xhat .+ w[2]
@@ -244,14 +237,14 @@ function reslayerx1(w,x,ms; padding=0, stride=1, mode=1)
 end
 
 function reslayerx2(w,x,ms; pads=[0,1,0], strides=[1,1,1], mode=1)
-    ba = reslayerx1(w[1:3],x,ms; padding=pads[1], stride=strides[1], mode=mode)
-    bb = reslayerx1(w[4:6],ba,ms; padding=pads[2], stride=strides[2], mode=mode)
-    bc = reslayerx0(w[7:9],bb,ms; padding=pads[3], stride=strides[3], mode=mode)
+    ba = reslayerx1(w[1:3],x,ms[1:2]; padding=pads[1], stride=strides[1], mode=mode)
+    bb = reslayerx1(w[4:6],ba,ms[3:4]; padding=pads[2], stride=strides[2], mode=mode)
+    bc = reslayerx0(w[7:9],bb,ms[5:6]; padding=pads[3], stride=strides[3], mode=mode)
 end
 
 function reslayerx3(w,x,ms; pads=[0,0,1,0], strides=[2,2,1,1], mode=1) # 12
-    a = reslayerx0(w[1:3],x,ms; stride=strides[1], padding=pads[1], mode=mode)
-    b = reslayerx2(w[4:12],x,ms; strides=strides[2:4], pads=pads[2:4], mode=mode)
+    a = reslayerx0(w[1:3],x,ms[1:2]; stride=strides[1], padding=pads[1], mode=mode)
+    b = reslayerx2(w[4:12],x,ms[3:8]; strides=strides[2:4], pads=pads[2:4], mode=mode)
     relu(a .+ b)
 end
 
