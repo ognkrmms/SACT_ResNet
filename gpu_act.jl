@@ -5,8 +5,9 @@ using JLD
 function main(args="")
     batchsize = 64
     lr=0.05
-    l1reg = 0.00001
+    l1reg = 0.0001
     aug = false
+    tau = 0.001
 
     xtrn,ytrn,xtst,ytst,mean_im = loaddata("cifar10")
     dtrn = minibatch(xtrn,ytrn,mean_im,batchsize)
@@ -17,14 +18,15 @@ function main(args="")
     w = add_act_weights(w,n_res_units)
     prms = init_opt_param(w, lr)
     
-    println("batchsize= $(batchsize), lr=$(lr), l1reg=$(l1reg),aug=$(aug)")
+    println("batchsize= $(batchsize), lr=$(lr), l1reg=$(l1reg),tau=$(tau), aug=$(aug)")
     report(epoch,ac1,ac2,n1)=println((:epoch,epoch,:trn,ac1,:tst,ac2,:norm,n1))
+    println(accuracy(w,dtrn,ms))
     #println((:epoch,0,:trn,accuracy(w,dtrn,ms),:tst,accuracy(w,dtst,ms),:wnorm,squared_sum_weights(w)))
-    epoch=1
-    @time for epoch=1:300
-        train(w,dtrn,ms,prms;l1=l1reg,aug=aug)
+    #=epoch=1
+    @time for epoch=1:1
+        train(w,dtrn,ms,prms;l1=l1reg,tau=tau,aug=aug)
         ac1 = accuracy(w,dtrn,ms)
-        #ac2 = accuracy(w,dtst,ms)
+        ac2 = 0#accuracy(w,dtst,ms)
         if epoch % 30 == 0
             lr = lr / 10
             change_lr(prms,lr)
@@ -36,13 +38,12 @@ function main(args="")
         end
         
         n1 = squared_sum_weights(w)
-        println((:epoch,epoch,:trn,ac1,:norm,n1))
-        #report(epoch,ac1,ac2,n1)
+        report(epoch,ac1,ac2,n1)
         
         if n1 == NaN32 #|| ac1[1] == 1.0
             break
         end
-    end
+    end=#
 end
 
 function loaddata(dataset)
@@ -87,7 +88,7 @@ function minibatch(x,y,mean_im,batchsize; atype=Array{Float32}, xrows=32, yrows=
     end
     all_data = all_data .- (mean_im./xscale)
     data = Any[]
-    #n_data = n_data > 20000 ? 64: n_data #for small experiments
+    n_data = n_data > 20000 ? 64: n_data #for small experiments
     n_batches = Int(floor(n_data / batchsize))
     for i=1:batchsize:n_batches*batchsize
         push!(data,(all_data[:,:,:,i:i+batchsize-1], all_labels[:,i:i+batchsize-1]))
@@ -135,7 +136,7 @@ function accuracy(w,dtst,ms,pred=resnet_cifar;mode=1)
     return (ncorrect/ninstance, nloss/ninstance, total_ponder_cost/ninstance)
 end
 
-function train(w,dtrn,ms,prms;l1=0,tau=0.005,aug=true)
+function train(w,dtrn,ms,prms;l1=0,tau=0,aug=true)
     for (x,y) in dtrn
         if aug
             x = augment_cifar10(x)
@@ -145,6 +146,9 @@ function train(w,dtrn,ms,prms;l1=0,tau=0.005,aug=true)
         g = lossgradient(w,x,ms,y;l1=l1,tau=tau,mode=0)
         for k=1:length(prms)
           update!(w[k],g[k],prms[k])
+          if k==12
+            println(Array(g[k]))
+          end
         end
     end
 end
@@ -155,155 +159,69 @@ function resnet_cifar(w,x,ms;mode=1)
     z = conv4(w[1],x; padding=1, stride=2)
     z = batchnorm(w[2:3],z,ms,1; mode=mode)
     
-    cum_score = zeros(Float32,size(x,4))
-    remainder = ones(Float32,size(x,4))
-    ponder_cost = zeros(Float32,size(x,4))
-    active = trues(size(x,4))
-    block_out = zeros(Float32,size(z))
-    # 3 4 3 ayir
+    sample_cont = collect(1:size(x,4))
+    sample_size = 16*16*128
+    cum_score = KnetArray(zeros(Float32,1,size(x,4)))
+    remainder = KnetArray(ones(Float32,size(x,4),1))
+    ponder_cost = KnetArray(zeros(Float32,size(x,4),1))
+    active = trues(size(x,4),1)
+    block_out = KnetArray(zeros(Float32,size(z)))
+
     sbase = 4
     msbase = 3
-    for i=1:3
+    for i=1:10
         z = reslayerx4(w[sbase+(i-1)*11:sbase+i*11-3],z,ms,msbase+(i-1)*6;mode=mode)
-        if i != 3            
-            h_z = pool(z;stride=1, window=16, mode=2)
-            h = sigm(w[sbase+i*11-2] * mat(h_z) .+ w[sbase+i*11-1])
-            h = convert(Array{Float32},h)
-            #h = zeros(Float32, 1,size(z,4))
+        if i != 10            
+            #=h_z = pool(z;stride=1, window=16, mode=2)
+            h = sigm(w[sbase+i*11-2] * mat(h_z) .+ w[sbase+i*11-1])=#
+            h = KnetArray(zeros(Float32, 1,size(z,4)))
         else
-            h = ones(Float32, 1,size(z,4))
+            h = KnetArray(ones(Float32, 1,size(z,4)))
         end
-        h = AutoGrad.getval(h)
-        cum_score[active] += h' # 10
+        
+        cum_score[active] += AutoGrad.getval(reshape(h,size(h,2))) # 10
         ponder_cost[active] += 1 # 11
-        z_cpu = AutoGrad.getval(convert(Array,z))
-        act_idx = 1
-        pos2del = Int16[]
-        for (idx,flag) in enumerate(active)
-            if flag
-                if  cum_score[idx] < stp_thresh
-                    block_out[:,:,:,idx] += h[act_idx] * z_cpu[:,:,:,act_idx]
-                    remainder[idx] -= h[act_idx]
-                else
-                    block_out[:,:,:,idx] += remainder[idx] * z_cpu[:,:,:,act_idx]
-                    ponder_cost[idx] += remainder[idx]
-                    push!(pos2del,act_idx)
-                    active[idx] = false
-                end
-                act_idx += 1
-            end
-        end
-        if length(pos2del) > 0
-            if length(pos2del) == size(z_cpu,4)
-                z = KnetArray(block_out)
-                break
-            else
-                z_cpu = delete_sample_from_eval(z_cpu,pos2del)
-                z = KnetArray(z_cpu)
-            end
-        end
-    end    
     
+        # find sample indices to continue and stop
+        score_cpu = convert(Array,cum_score[active])
+        pos2stop = sample_cont[score_cpu .>= stp_thresh]
+        pos2cont = sample_cont[score_cpu .< stp_thresh]
+        
+        idx2update = collect(1+(sample_cont[1]-1)*sample_size:sample_cont[1]*sample_size)
+        for i=2:length(sample_cont)
+            idx2update = [idx2update;collect(1+(sample_cont[i]-1)*sample_size:sample_size*sample_cont[i])]
+        end
+        if !isempty(pos2cont)
+            idx2cont = collect(1+(pos2cont[1]-1)*sample_size:pos2cont[1]*sample_size)
+            for i=2:length(pos2cont)
+                idx2cont = [idx2cont;collect(1+(pos2cont[i]-1)*sample_size:sample_size*pos2cont[i])]
+            end
+            #cont
+            remainder[pos2cont] -= h[pos2cont]
+        end
+        #stop
+        h[pos2stop] = remainder[pos2stop]
+        ponder_cost[pos2stop] += remainder[pos2stop]
+        active[pos2stop] = false
 
-    cum_score = zeros(Float32,size(x,4))
-    remainder = ones(Float32,size(x,4))
-    active = trues(size(x,4))
-    block_out = zeros(Float32,size(z))
-    sbase = sbase + 3*9 + 2*2 #35
-    msbase = msbase + 6*3
-    for i=1:4
-        z = reslayerx4(w[sbase+(i-1)*11:sbase+i*11-3],z,ms,msbase+(i-1)*6;mode=mode)
-        if i != 4
-            h_z = pool(z;stride=1, window=16, mode=2)
-            h = sigm(w[sbase+i*11-2] * mat(h_z) .+ w[sbase+i*11-1])
-            h = convert(Array{Float32},h)
-            #h = zeros(Float32, 1,size(z,4))
+        #update block_out
+        h = reshape(h,1,1,1,size(h,2))
+        temp = h.*z
+        block_out[idx2update] += temp[1:end]
+
+        #update active pos
+        if isempty(pos2cont)
+            z = block_out
+            break
         else
-            h = ones(Float32, 1,size(z,4))
-        end
-        h = AutoGrad.getval(h)
-
-        cum_score[active] += h' # 10
-        ponder_cost[active] += 1 # 11
-        z_cpu = AutoGrad.getval(convert(Array,z))
-        act_idx = 1
-        pos2del = Int16[]
-        for (idx,flag) in enumerate(active)
-            if flag
-                if  cum_score[idx] < stp_thresh
-                    block_out[:,:,:,idx] += h[act_idx] * z_cpu[:,:,:,act_idx]
-                    remainder[idx] -= h[act_idx]
-                else
-                    block_out[:,:,:,idx] += remainder[idx] * z_cpu[:,:,:,act_idx]
-                    ponder_cost[idx] += remainder[idx]
-                    push!(pos2del,act_idx)
-                    active[idx] = false
-                end
-                act_idx += 1
-            end
-        end
-        if length(pos2del) > 0
-            if length(pos2del) == size(z_cpu,4)
-                z = KnetArray(block_out)
-                break
-            else
-                z_cpu = delete_sample_from_eval(z_cpu,pos2del)
-                z = KnetArray(z_cpu)
-            end
-        end
-    end        
-
-    cum_score = zeros(Float32,size(x,4))
-    remainder = ones(Float32,size(x,4))
-    active = trues(size(x,4))
-    block_out = zeros(Float32,size(z))
-    sbase = sbase + 4*9 + 3*2
-    msbase = msbase + 4*6
-    for i=1:3
-        z = reslayerx4(w[sbase+(i-1)*11:sbase+i*11-3],z,ms,msbase+(i-1)*6;mode=mode)
-        if i != 3
-            h_z = pool(z;stride=1, window=16, mode=2)
-            h = sigm(w[sbase+i*11-2] * mat(h_z) .+ w[sbase+i*11-1])
-            h = convert(Array{Float32},h)
-            #h = zeros(Float32, 1,size(z,4))
-        else
-            h = ones(Float32, 1,size(z,4))
-        end
-        h = AutoGrad.getval(h)
-
-        cum_score[active] += h' # 10
-        ponder_cost[active] += 1 # 11
-        z_cpu = AutoGrad.getval(convert(Array,z))
-        act_idx = 1
-        pos2del = Int16[]
-        for (idx,flag) in enumerate(active)
-            if flag
-                if  cum_score[idx] < stp_thresh
-                    block_out[:,:,:,idx] += h[act_idx] * z_cpu[:,:,:,act_idx]
-                    remainder[idx] -= h[act_idx]
-                else
-                    block_out[:,:,:,idx] += remainder[idx] * z_cpu[:,:,:,act_idx]
-                    ponder_cost[idx] += remainder[idx]
-                    push!(pos2del,act_idx)
-                    active[idx] = false
-                end
-                act_idx += 1
-            end
-        end
-        if length(pos2del) > 0
-            if length(pos2del) == size(z_cpu,4)
-                z = KnetArray(block_out)
-                break
-            else
-                z_cpu = delete_sample_from_eval(z_cpu,pos2del)
-                z = KnetArray(z_cpu)
-            end
+            z = reshape(z[idx2cont],16,16,128, length(pos2cont))
+            sample_cont = pos2cont
         end
     end    
 
     z  = pool(z; stride=1, window=16, mode=2)
     z = w[end-1] * mat(z) .+ w[end]
-    return (z, sum(ponder_cost))   
+    return (z, sum(ponder_cost))  
 end
 
 function act_blockx4(w,x,ms,last_unit;pads=[0,1,0], strides=[1,1,1], mode=1)
@@ -377,15 +295,13 @@ function add_act_weights(w, n_units,block_size=[3, 4, 3])
     act_count = 0
     block_size = [0;block_size]
     res_start = 9 
-    for k=2:length(block_size)
-        for i=1:block_size[k]-1
-            curr_idx = 4 + res_start + 2*act_count            
-            insert!(w, curr_idx, randn(Float32,1,filt_size)*sqrt(1/filt_size))
-            insert!(w, curr_idx+1, ones(Float32,1)*-2.5) # Change muliplier to -2.5 maybe?
-            act_count += 1
-            res_start += 9
-        end
+
+    for i=1:9
+        curr_idx = 4 + res_start + 2*act_count 
+        insert!(w, curr_idx, randn(Float32,1,filt_size)*sqrt(1/filt_size))
+        insert!(w, curr_idx+1, ones(Float32,1)*-2.7) # Change muliplier to -2.5 maybe?
         res_start += 9
+        act_count += 1
     end
     w = map(KnetArray, w)
 end
