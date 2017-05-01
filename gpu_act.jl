@@ -13,19 +13,20 @@ function main(args="")
     dtrn = minibatch(xtrn,ytrn,mean_im,batchsize)
     #dtst = minibatch(xtst,ytst,mean_im,batchsize)
     #w,ms = init_weights("cifar10")
-    w,ms = load_res_model("weights_keras_epoch128.jld")
+    w,ms = load_res_model("weights_keras_epoch246.jld")
     n_res_units = Int((size(w,1) - 5) / 9)
     w = add_act_weights(w,n_res_units)
     prms = init_opt_param(w, lr)
     
     println("batchsize= $(batchsize), lr=$(lr), l1reg=$(l1reg),tau=$(tau), aug=$(aug)")
     report(epoch,ac1,ac2,n1)=println((:epoch,epoch,:trn,ac1,:tst,ac2,:norm,n1))
-    println(accuracy(w,dtrn,ms))
+    #println(accuracy(w,dtrn,ms))
+    println(accuracy(w,dtrn,ms,act_predict_train))
     #println((:epoch,0,:trn,accuracy(w,dtrn,ms),:tst,accuracy(w,dtst,ms),:wnorm,squared_sum_weights(w)))
-    #=epoch=1
-    @time for epoch=1:1
+    epoch=1
+    @time for epoch=1:5
         train(w,dtrn,ms,prms;l1=l1reg,tau=tau,aug=aug)
-        ac1 = accuracy(w,dtrn,ms)
+        ac1 = accuracy(w,dtrn,ms,act_predict_train)
         ac2 = 0#accuracy(w,dtst,ms)
         if epoch % 30 == 0
             lr = lr / 10
@@ -43,7 +44,7 @@ function main(args="")
         if n1 == NaN32 #|| ac1[1] == 1.0
             break
         end
-    end=#
+    end
 end
 
 function loaddata(dataset)
@@ -106,7 +107,7 @@ function predict(x,nclasses)
 end
 
 function loss(w,x,ms,ygold;l1=0, mode=1,tau=0)
-    ypred,ponder_cost = resnet_cifar(w,x,ms;mode=mode)
+    ypred,ponder_cost = act_predict_train(w,x,ms;mode=mode)
     ynorm = logp(ypred,1)
     J = (-sum(ygold .* ynorm) / size(ygold,2)) + tau * ponder_cost
     if l1 != 0
@@ -146,13 +147,12 @@ function train(w,dtrn,ms,prms;l1=0,tau=0,aug=true)
         g = lossgradient(w,x,ms,y;l1=l1,tau=tau,mode=0)
         for k=1:length(prms)
           update!(w[k],g[k],prms[k])
-          if k==12
-            println(Array(g[k]))
-          end
         end
     end
 end
 
+# This function is only for prediction NOT FOR TRAINING
+# TODO: Fix the bug in idx2cont
 function resnet_cifar(w,x,ms;mode=1)
     epsilon = 0.1
     stp_thresh = 1 - epsilon
@@ -172,21 +172,23 @@ function resnet_cifar(w,x,ms;mode=1)
     for i=1:10
         z = reslayerx4(w[sbase+(i-1)*11:sbase+i*11-3],z,ms,msbase+(i-1)*6;mode=mode)
         if i != 10            
-            #=h_z = pool(z;stride=1, window=16, mode=2)
-            h = sigm(w[sbase+i*11-2] * mat(h_z) .+ w[sbase+i*11-1])=#
-            h = KnetArray(zeros(Float32, 1,size(z,4)))
+            h_z = pool(z;stride=1, window=16, mode=2)
+            h = sigm(w[sbase+i*11-2] * mat(h_z) .+ w[sbase+i*11-1])
+            #h = KnetArray(zeros(Float32, 1,size(z,4)))
         else
             h = KnetArray(ones(Float32, 1,size(z,4)))
         end
         
-        cum_score[active] += AutoGrad.getval(reshape(h,size(h,2))) # 10
+        cum_score[active] = cum_score[active] + h[1:end]# 10
         ponder_cost[active] += 1 # 11
     
         # find sample indices to continue and stop
         score_cpu = convert(Array,cum_score[active])
         pos2stop = sample_cont[score_cpu .>= stp_thresh]
         pos2cont = sample_cont[score_cpu .< stp_thresh]
-        
+        h_idx2cont = collect(1:size(h,2))[score_cpu .< stp_thresh]
+        h_idx2stop = collect(1:size(h,2))[score_cpu .>= stp_thresh]
+
         idx2update = collect(1+(sample_cont[1]-1)*sample_size:sample_cont[1]*sample_size)
         for i=2:length(sample_cont)
             idx2update = [idx2update;collect(1+(sample_cont[i]-1)*sample_size:sample_size*sample_cont[i])]
@@ -197,10 +199,10 @@ function resnet_cifar(w,x,ms;mode=1)
                 idx2cont = [idx2cont;collect(1+(pos2cont[i]-1)*sample_size:sample_size*pos2cont[i])]
             end
             #cont
-            remainder[pos2cont] -= h[pos2cont]
+            remainder[pos2cont] -= AutoGrad.getval(h[h_idx2cont])
         end
         #stop
-        h[pos2stop] = remainder[pos2stop]
+        h[h_idx2stop] = remainder[pos2stop]
         ponder_cost[pos2stop] += remainder[pos2stop]
         active[pos2stop] = false
 
@@ -214,12 +216,76 @@ function resnet_cifar(w,x,ms;mode=1)
             z = block_out
             break
         else
+            println(prod(size(z))," ", maximum(idx2cont)," ", length(pos2cont))
             z = reshape(z[idx2cont],16,16,128, length(pos2cont))
-            sample_cont = pos2cont
         end
+        sample_cont = pos2cont
     end    
 
     z  = pool(z; stride=1, window=16, mode=2)
+    z = w[end-1] * mat(z) .+ w[end]
+    return (z, sum(ponder_cost))  
+end
+
+function act_predict_train(w,x,ms;mode=0)
+    epsilon = 0.1
+    stp_thresh = 1 - epsilon
+    z = conv4(w[1],x; padding=1, stride=2)
+    z = batchnorm(w[2:3],z,ms,1; mode=mode)
+    
+    sample_cont = collect(1:size(x,4))
+    sample_size = 16*16*128
+    cum_score = KnetArray(zeros(Float32,1,size(x,4)))
+    remainder = KnetArray(ones(Float32,1,size(x,4)))
+    ponder_cost = KnetArray(zeros(Float32,1,size(x,4)))
+    active = trues(1,size(x,4))
+    block_out = KnetArray(zeros(Float32,size(z)))
+    all_one = KnetArray(ones(Float32,1,size(x,4)))
+    active_mask = KnetArray(ones(Float32,1,size(x,4)))
+    sbase = 4
+    msbase = 3
+
+    for i=1:10
+        z = reslayerx4(w[sbase+(i-1)*11:sbase+i*11-3],z,ms,msbase+(i-1)*6;mode=mode)
+        if i != 10            
+            h_z = pool(z;stride=1, window=16, mode=2)
+            h = active_mask .* sigm(w[sbase+i*11-2] * mat(h_z) .+ w[sbase+i*11-1])
+            #h = KnetArray(zeros(Float32, 1,size(z,4)))
+        else
+            h = active_mask .* KnetArray(ones(Float32, 1,size(z,4)))
+        end
+
+        cum_score += h # 10
+        ponder_cost += active_mask .* all_one # 11
+
+        score_cpu = convert(Array,cum_score)
+        pos2stop = sample_cont[score_cpu .>= stp_thresh]
+        pos2juststop = sample_cont[(score_cpu .>= stp_thresh) & active]
+        pos2cont = sample_cont[score_cpu .< stp_thresh]
+    
+        if !isempty(pos2cont)
+            #cont
+            mask2cont = ones(Float32,1,size(x,4))
+            mask2cont[pos2stop] = 0
+            mask2cont = KnetArray(mask2cont)
+            remainder -= h.* mask2cont #14
+
+            block_out += reshape((h.* mask2cont),1,1,1,size(x,4)) .*z
+            active_mask = active_mask .* mask2cont
+        end
+
+        if !isempty(pos2juststop)
+            mask2stop = zeros(Float32,1,size(x,4))
+            mask2stop[pos2juststop] = 1
+            mask2stop = KnetArray(mask2stop)
+
+            block_out += reshape((remainder .* mask2stop),1,1,1,size(x,4)) .* z
+            ponder_cost += remainder .* mask2stop
+            active[pos2juststop] = false
+        end        
+    end
+
+    z  = pool(block_out; stride=1, window=16, mode=2)
     z = w[end-1] * mat(z) .+ w[end]
     return (z, sum(ponder_cost))  
 end
@@ -299,7 +365,7 @@ function add_act_weights(w, n_units,block_size=[3, 4, 3])
     for i=1:9
         curr_idx = 4 + res_start + 2*act_count 
         insert!(w, curr_idx, randn(Float32,1,filt_size)*sqrt(1/filt_size))
-        insert!(w, curr_idx+1, ones(Float32,1)*-2.7) # Change muliplier to -2.5 maybe?
+        insert!(w, curr_idx+1, ones(Float32,1)*-2.5) # Change muliplier to -2.5 maybe?
         res_start += 9
         act_count += 1
     end
