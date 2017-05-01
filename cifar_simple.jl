@@ -5,7 +5,7 @@ using JLD
 function main(args="")
     batchsize = 128
     lr=0.1
-    l1reg = 0.00001
+    l2reg = 0.00001
     aug = true
 
     xtrn,ytrn,xtst,ytst,mean_im = loaddata("cifar10")
@@ -17,12 +17,12 @@ function main(args="")
     #prms = init_opt_param_adam(w)
     #Knet.knetgc(); gc()
     
-    println("batchsize= $(batchsize), lr=$(lr), l1reg=$(l1reg),aug=$(aug)")
+    println("batchsize= $(batchsize), lr=$(lr), l2reg=$(l2reg),aug=$(aug)")
     report(epoch,ac1,ac2,n1)=println((:epoch,epoch,:trn,ac1,:tst,ac2,:norm,n1))    
     println((:epoch,0,:trn,accuracy(w,dtrn,ms),:tst,accuracy(w,dtst,ms),:wnorm,squared_sum_weights(w)))
     epoch=1
     @time for epoch=1:300
-        train(w,dtrn,ms,prms;l1=l1reg,aug=aug)
+        train(w,dtrn,ms,prms;l2=l2reg,aug=aug)
         ac1 = accuracy(w,dtrn,ms)
         ac2 = accuracy(w,dtst,ms)
         if epoch > 80
@@ -104,12 +104,12 @@ function predict(x,nclasses)
     output = randn(nclasses, nInstances) * 0.1
 end
 
-function loss(w,x,ms,ygold;l1=0, mode=1)
+function loss(w,x,ms,ygold;l2=0, mode=1)
     ypred = resnet_cifar(w,x,ms;mode=mode)
     ynorm = logp(ypred,1)
     J = -sum(ygold .* ynorm) / size(ygold,2)
-    if l1 != 0
-        J += l1 * squared_sum_weights(w)
+    if l2 != 0
+        J += l2 * squared_sum_weights(w)
     end
     return J
 end
@@ -134,14 +134,14 @@ function accuracy(w,dtst,ms,pred=resnet_cifar;mode=1)
     return (ncorrect/ninstance, nloss/ninstance)
 end
 
-function train(w,dtrn,ms,prms;l1=0,aug=true)
+function train(w,dtrn,ms,prms;l2=0,aug=true)
     for (x,y) in dtrn
         if aug
             x = augment_cifar10(x)
         end
         x = convert(KnetArray{Float32}, x)
         y = convert(KnetArray{Float32}, y)
-        g = lossgradient(w,x,ms,y;l1=l1,mode=0)
+        g = lossgradient(w,x,ms,y;l2=l2,mode=0)
         for k=1:length(prms)
           update!(w[k],g[k],prms[k])
         end

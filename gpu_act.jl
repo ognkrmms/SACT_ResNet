@@ -5,29 +5,28 @@ using JLD
 function main(args="")
     batchsize = 64
     lr=0.05
-    l1reg = 0.0001
+    l2reg = 0#0.0001 At the momemnt there happens a bug if l2reg isn't equal to 0
     aug = false
-    tau = 0.001
+    tau = 0.01
 
     xtrn,ytrn,xtst,ytst,mean_im = loaddata("cifar10")
     dtrn = minibatch(xtrn,ytrn,mean_im,batchsize)
-    #dtst = minibatch(xtst,ytst,mean_im,batchsize)
+    dtst = minibatch(xtst,ytst,mean_im,batchsize)
     #w,ms = init_weights("cifar10")
     w,ms = load_res_model("weights_keras_epoch246.jld")
     n_res_units = Int((size(w,1) - 5) / 9)
     w = add_act_weights(w,n_res_units)
     prms = init_opt_param(w, lr)
     
-    println("batchsize= $(batchsize), lr=$(lr), l1reg=$(l1reg),tau=$(tau), aug=$(aug)")
+    println("batchsize= $(batchsize), lr=$(lr), l2reg=$(l2reg),tau=$(tau), aug=$(aug)")
     report(epoch,ac1,ac2,n1)=println((:epoch,epoch,:trn,ac1,:tst,ac2,:norm,n1))
     #println(accuracy(w,dtrn,ms))
-    println(accuracy(w,dtrn,ms,act_predict_train))
-    #println((:epoch,0,:trn,accuracy(w,dtrn,ms),:tst,accuracy(w,dtst,ms),:wnorm,squared_sum_weights(w)))
-    epoch=1
-    @time for epoch=1:5
-        train(w,dtrn,ms,prms;l1=l1reg,tau=tau,aug=aug)
+    #println(accuracy(w,dtrn,ms,act_predict_train))
+    println((:epoch,0,:trn,accuracy(w,dtrn,ms),:tst,accuracy(w,dtst,ms),:wnorm,squared_sum_weights(w)))
+    @time for epoch=1:1
+        train(w,dtrn,ms,prms;l2=l2reg,tau=tau,aug=aug)
         ac1 = accuracy(w,dtrn,ms,act_predict_train)
-        ac2 = 0#accuracy(w,dtst,ms)
+        ac2 = accuracy(w,dtst,ms)
         if epoch % 30 == 0
             lr = lr / 10
             change_lr(prms,lr)
@@ -89,7 +88,7 @@ function minibatch(x,y,mean_im,batchsize; atype=Array{Float32}, xrows=32, yrows=
     end
     all_data = all_data .- (mean_im./xscale)
     data = Any[]
-    n_data = n_data > 20000 ? 64: n_data #for small experiments
+    #n_data = n_data > 20000 ? 64: n_data #for small experiments
     n_batches = Int(floor(n_data / batchsize))
     for i=1:batchsize:n_batches*batchsize
         push!(data,(all_data[:,:,:,i:i+batchsize-1], all_labels[:,i:i+batchsize-1]))
@@ -106,18 +105,20 @@ function predict(x,nclasses)
     output = randn(nclasses, nInstances) * 0.1
 end
 
-function loss(w,x,ms,ygold;l1=0, mode=1,tau=0)
+function loss(w,x,ms,ygold;l2=0, mode=1,tau=0)
     ypred,ponder_cost = act_predict_train(w,x,ms;mode=mode)
     ynorm = logp(ypred,1)
-    J = (-sum(ygold .* ynorm) / size(ygold,2)) + tau * ponder_cost
-    if l1 != 0
-        J += l1 * squared_sum_weights(w)
+    J = (-sum(ygold .* ynorm) / size(ygold,2)) + tau * ponder_cost / size(ygold,2)
+    if l2 != 0
+        J += l2 * squared_sum_weights(w)
     end
     return J
 end
 
 function squared_sum_weights(w)
-    return sum(sumabs2(wi) for wi in w)
+    #idx2sum = collect(1:length(w))
+    #deleteat!(idx2sum,14:11:102)
+    return sum(sumabs2(wi) for wi in w[idx2sum])
 end
 
 lossgradient = grad(loss)
@@ -137,14 +138,14 @@ function accuracy(w,dtst,ms,pred=resnet_cifar;mode=1)
     return (ncorrect/ninstance, nloss/ninstance, total_ponder_cost/ninstance)
 end
 
-function train(w,dtrn,ms,prms;l1=0,tau=0,aug=true)
+function train(w,dtrn,ms,prms;l2=0,tau=0,aug=true)
     for (x,y) in dtrn
         if aug
             x = augment_cifar10(x)
         end
         x = convert(KnetArray{Float32}, x)
         y = convert(KnetArray{Float32}, y)
-        g = lossgradient(w,x,ms,y;l1=l1,tau=tau,mode=0)
+        g = lossgradient(w,x,ms,y;l2=l2,tau=tau,mode=0)
         for k=1:length(prms)
           update!(w[k],g[k],prms[k])
         end
@@ -262,7 +263,7 @@ function act_predict_train(w,x,ms;mode=0)
         pos2stop = sample_cont[score_cpu .>= stp_thresh]
         pos2juststop = sample_cont[(score_cpu .>= stp_thresh) & active]
         pos2cont = sample_cont[score_cpu .< stp_thresh]
-    
+        
         if !isempty(pos2cont)
             #cont
             mask2cont = ones(Float32,1,size(x,4))
@@ -282,7 +283,11 @@ function act_predict_train(w,x,ms;mode=0)
             block_out += reshape((remainder .* mask2stop),1,1,1,size(x,4)) .* z
             ponder_cost += remainder .* mask2stop
             active[pos2juststop] = false
-        end        
+        end
+
+        if isempty(pos2cont)
+            break
+        end
     end
 
     z  = pool(block_out; stride=1, window=16, mode=2)

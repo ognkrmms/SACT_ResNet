@@ -6,7 +6,7 @@ function main(args="")
     batchsize = 128
     block_size = 6
     lr=0.1
-    l1reg = 0.0001
+    l2reg = 0.0001
     aug = true
 
     xtrn,ytrn,xtst,ytst,mean_im = loaddata("cifar10")
@@ -15,12 +15,12 @@ function main(args="")
     w,ms = init_weights("cifar10",block_size)
     prms = init_opt_param(w,lr)
     #Knet.knetgc(); gc()
-    println("batchsize= $(batchsize), blocksize= $(block_size), lr=$(lr), l1reg=$(l1reg), augmentation=$(aug)")
+    println("batchsize= $(batchsize), blocksize= $(block_size), lr=$(lr), l2reg=$(l2reg), augmentation=$(aug)")
     report(epoch,ac1,ac2,n1)=println((:epoch,epoch,:trn,ac1,:tst,ac2,:norm,n1))
     
     println(accuracy(w,dtrn,ms,block_size))
     @time for epoch=1:200
-        train(w,dtrn,ms,block_size,prms;l1=l1reg,aug=aug)
+        train(w,dtrn,ms,block_size,prms;l2=l2reg,aug=aug)
         ac1 = accuracy(w,dtrn,ms,block_size)
         ac2 = accuracy(w,dtst,ms,block_size)
         if epoch > 80
@@ -99,12 +99,12 @@ function predict(x,nclasses)
     output = randn(nclasses, nInstances) * 0.1
 end
 
-function loss(w,x,ms,block_size,ygold;l1=0,mode=1)
+function loss(w,x,ms,block_size,ygold;l2=0,mode=1)
     ypred = resnet_cifar(w,x,ms,block_size;mode=mode)
     ynorm = logp(ypred,1)
     J = -sum(ygold .* ynorm) / size(ygold,2)
-    if l1 != 0
-        J += l1 * squared_sum_weights(w)
+    if l2 != 0
+        J += l2 * squared_sum_weights(w)
     end
     return J
 end
@@ -132,14 +132,14 @@ function accuracy(w,dtst,ms, block_size,pred=resnet_cifar;mode=1)
     return (acc, J)
 end
 
-function train(w,dtrn,ms,block_size,prms;l1=0,aug=true)
+function train(w,dtrn,ms,block_size,prms;l2=0,aug=true)
     for (x,y) in dtrn
         if aug
             x = augment_cifar10(x)
         end
         x = convert(KnetArray{Float32}, aug_x)
         y = convert(KnetArray{Float32}, y)
-        g = lossgradient(w,x,ms,block_size,y;l1=l1,mode=0)
+        g = lossgradient(w,x,ms,block_size,y;l2=l2,mode=0)
         for k=1:length(prms)
           update!(w[k],g[k],prms[k])
         end
